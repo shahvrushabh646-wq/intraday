@@ -1,0 +1,8 @@
+{
+  "name": "intraday-ai-platform",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node backend/server.mjs", "dev": "node --watch backend/server.mjs" },
+  "engines": { "node": ">=22" }
+}
