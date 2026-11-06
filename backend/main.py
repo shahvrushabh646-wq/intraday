@@ -194,11 +194,22 @@ def nse_overview():
     cached = _NSE_CACHE.get("overview")
     if cached and now - _NSE_CACHE["fetched_at"] < 60:
         return cached
-    indices = nse_mcp_call("cm_get_live_indices", {"group": "derivatives", "nameFilter": ""})
-    movers = nse_mcp_call("nse_get_market_movers", {"indexName": "", "limit": 5})
+    errors = []
+    indices, movers = {}, {}
+    try:
+        indices = nse_mcp_call("cm_get_live_indices", {"group": "derivatives", "nameFilter": ""})
+    except HTTPException as exc:
+        errors.append("Indices snapshot: " + str(exc.detail))
+    try:
+        movers = nse_mcp_call("nse_get_market_movers", {"indexName": "", "limit": 5})
+    except HTTPException as exc:
+        errors.append("Market movers: " + str(exc.detail))
+    index_groups = indices.get("indices", {})
+    index_rows = index_groups.get("derivatives", []) if isinstance(index_groups, dict) else []
     overview = {"provider": "NSE official MCP", "delay": "approximately 1–3 minutes",
                 "informational_only": True, "intraday_candles": False,
-                "indices": indices.get("indices", {}).get("derivatives", []),
+                "available": bool(index_rows or movers), "errors": errors,
+                "indices": index_rows,
                 "index_timestamp": indices.get("nseTimestamp") or indices.get("updatedAt"),
                 "movers": movers, "source_timestamp": movers.get("gainersUpdatedAt") or movers.get("losersUpdatedAt"),
                 "warning": "Delayed informational data only. Not for trading signals or investment advice."}
