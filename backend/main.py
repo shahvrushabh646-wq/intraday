@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import json
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
@@ -131,6 +132,80 @@ def upstox_request(path: str, params: dict[str, str] | None = None) -> dict:
         raise HTTPException(502, "Could not reach Upstox market data. Try again shortly.") from exc
 
 
+_NSE_CACHE = {"fetched_at": 0.0, "overview": None}
+_NSE_MCP_URL = "https://mcp.nseindia.in/cmmkt/mcp"
+
+
+def _mcp_payload(raw: str) -> dict:
+    raw = raw.strip()
+    if raw.startswith("{"):
+        return json.loads(raw)
+    data = [line[5:].strip() for line in raw.splitlines() if line.startswith("data:")]
+    if not data:
+        raise ValueError("NSE MCP returned an empty response")
+    return json.loads(data[-1])
+
+
+def nse_mcp_call(tool_name: str, arguments: dict) -> dict:
+    headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                       "clientInfo": {"name": "intraday-ai-research", "version": "1.0"}}}
+    try:
+        request = Request(_NSE_MCP_URL, data=json.dumps(init).encode("utf-8"), headers=headers, method="POST")
+        with urlopen(request, timeout=8) as response:
+            session_id = response.headers.get("Mcp-Session-Id")
+            initialized = _mcp_payload(response.read().decode("utf-8"))
+        if initialized.get("error") or not session_id:
+            raise ValueError("NSE MCP initialization failed")
+        headers["Mcp-Session-Id"] = session_id
+        headers["Mcp-Protocol-Version"] = "2025-03-26"
+        call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": tool_name, "arguments": arguments}}
+        request = Request(_NSE_MCP_URL, data=json.dumps(call).encode("utf-8"), headers=headers, method="POST")
+        with urlopen(request, timeout=8) as response:
+            envelope = _mcp_payload(response.read().decode("utf-8"))
+        if envelope.get("error"):
+            raise ValueError("NSE MCP tool call failed")
+        result = envelope.get("result", {})
+        if result.get("isError"):
+            raise ValueError("NSE MCP returned a data error")
+        text_blocks = [block.get("text", "") for block in result.get("content", []) if block.get("type") == "text"]
+        if not text_blocks:
+            raise ValueError("NSE MCP returned no data")
+        return json.loads(text_blocks[0])
+    except HTTPError as exc:
+        raise HTTPException(502, f"NSE public market snapshot is unavailable (HTTP {exc.code}).") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(502, "NSE public market snapshot is temporarily unavailable.") from exc
+
+
+@app.get("/api/nse/status")
+def nse_status():
+    return {"provider": "NSE official MCP", "configured": True, "mode": "delayed-snapshot",
+            "delay": "approximately 1–3 minutes", "api_key_required": False,
+            "signal_eligible": False,
+            "message": "Informational market snapshots only; this source does not provide intraday candles."}
+
+
+@app.get("/api/nse/overview")
+def nse_overview():
+    now = time.monotonic()
+    cached = _NSE_CACHE.get("overview")
+    if cached and now - _NSE_CACHE["fetched_at"] < 60:
+        return cached
+    indices = nse_mcp_call("cm_get_live_indices", {"group": "derivatives", "nameFilter": ""})
+    movers = nse_mcp_call("nse_get_market_movers", {"indexName": "", "limit": 5})
+    overview = {"provider": "NSE official MCP", "delay": "approximately 1–3 minutes",
+                "informational_only": True, "intraday_candles": False,
+                "indices": indices.get("indices", {}).get("derivatives", []),
+                "index_timestamp": indices.get("nseTimestamp") or indices.get("updatedAt"),
+                "movers": movers, "source_timestamp": movers.get("gainersUpdatedAt") or movers.get("losersUpdatedAt"),
+                "warning": "Delayed informational data only. Not for trading signals or investment advice."}
+    _NSE_CACHE["fetched_at"], _NSE_CACHE["overview"] = now, overview
+    return overview
+
+
 @app.get("/api", include_in_schema=False)
 def service_home():
     return {"service": "INTRADAY AI API", "docs": "/docs", "health": "/api/health"}
@@ -146,10 +221,10 @@ def health():
     with db() as conn:
         row = conn.execute("SELECT COUNT(*) AS count, MAX(received_at) AS latest FROM candles").fetchone()
     configured = bool(os.environ.get("UPSTOX_ACCESS_TOKEN", "").strip())
-    return {"status": "ok", "data_mode": "provider-connected" if configured else "provider-disconnected",
+    return {"status": "ok", "data_mode": "upstox-configured" if configured else "nse-delayed-snapshot",
             "stored_candles": row["count"], "last_received_at": row["latest"],
-            "market_data_source": "Upstox" if configured else None, "provider_configured": configured,
-            "live_data": False,
+            "market_data_source": "Upstox (token configured)" if configured else "NSE official delayed snapshots",
+            "provider_configured": configured, "free_snapshot_available": True, "live_data": False,
             "storage": "ephemeral /tmp SQLite; use managed PostgreSQL for durable production data" if os.environ.get("VERCEL") else "local SQLite"}
 
 
