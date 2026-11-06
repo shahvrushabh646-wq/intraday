@@ -147,7 +147,9 @@ def _mcp_payload(raw: str) -> dict:
 
 
 def nse_mcp_call(tool_name: str, arguments: dict) -> dict:
-    headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+    headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json",
+               "User-Agent": "INTRADAY-AI/1.0 (market research dashboard)",
+               "Referer": "https://www.nseindia.com/"}
     init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-03-26", "capabilities": {},
                        "clientInfo": {"name": "intraday-ai-research", "version": "1.0"}}}
@@ -159,7 +161,8 @@ def nse_mcp_call(tool_name: str, arguments: dict) -> dict:
         if initialized.get("error") or not session_id:
             raise ValueError("NSE MCP initialization failed")
         headers["Mcp-Session-Id"] = session_id
-        headers["Mcp-Protocol-Version"] = "2025-03-26"
+        negotiated_version = initialized.get("result", {}).get("protocolVersion", "2025-03-26")
+        headers["Mcp-Protocol-Version"] = negotiated_version
         call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": {"name": tool_name, "arguments": arguments}}
         request = Request(_NSE_MCP_URL, data=json.dumps(call).encode("utf-8"), headers=headers, method="POST")
@@ -175,7 +178,14 @@ def nse_mcp_call(tool_name: str, arguments: dict) -> dict:
             raise ValueError("NSE MCP returned no data")
         return json.loads(text_blocks[0])
     except HTTPError as exc:
-        raise HTTPException(502, f"NSE public market snapshot is unavailable (HTTP {exc.code}).") from exc
+        try:
+            upstream_detail = exc.read(240).decode("utf-8", errors="replace").strip()
+        except Exception:
+            upstream_detail = ""
+        detail = f"NSE public market snapshot is unavailable (HTTP {exc.code})."
+        if upstream_detail:
+            detail += " " + upstream_detail[:180]
+        raise HTTPException(502, detail) from exc
     except (URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(502, "NSE public market snapshot is temporarily unavailable.") from exc
 
