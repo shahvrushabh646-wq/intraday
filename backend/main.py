@@ -167,6 +167,17 @@ def nse_mcp_call(tool_name: str, arguments: dict) -> dict:
         headers["Mcp-Session-Id"] = session_id
         negotiated_version = initialized.get("result", {}).get("protocolVersion", "2025-03-26")
         headers["Mcp-Protocol-Version"] = negotiated_version
+        # Complete the MCP handshake before invoking tools. Some gateways bind
+        # the initialized session only after receiving this notification.
+        initialized_notice = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+        notice_request = Request(_NSE_MCP_URL, data=json.dumps(initialized_notice).encode("utf-8"),
+                                 headers=headers, method="POST")
+        try:
+            with opener.open(notice_request, timeout=4) as response:
+                response.read()
+        except HTTPError as notice_error:
+            if notice_error.code != 404:
+                raise
         call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": {"name": tool_name, "arguments": arguments}}
         request = Request(_NSE_MCP_URL, data=json.dumps(call).encode("utf-8"), headers=headers, method="POST")
