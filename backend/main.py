@@ -202,8 +202,10 @@ def nse_status():
 def nse_overview():
     now = time.monotonic()
     cached = _NSE_CACHE.get("overview")
-    if cached and now - _NSE_CACHE["fetched_at"] < 60:
-        return cached
+    if cached:
+        cache_ttl = 60 if cached.get("available") else 8
+        if now - _NSE_CACHE["fetched_at"] < cache_ttl:
+            return cached
     movers = {}
     errors = []
     try:
