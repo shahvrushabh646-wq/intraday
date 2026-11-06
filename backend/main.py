@@ -234,4 +234,87 @@ def list_paper_trades():
     return {"mode": "paper", "trades": [dict(r) for r in rows]}
 
 
+@app.get("/api/instruments")
+def instruments(exchange: Literal["NSE", "BSE"] | None = None, interval: str | None = None):
+    query = "SELECT exchange, symbol, MAX(ts) AS latest FROM candles"
+    filters, args = [], []
+    if exchange:
+        filters.append("exchange=?")
+        args.append(exchange)
+    if interval:
+        filters.append("interval=?")
+        args.append(interval)
+    if filters:
+        query += " WHERE " + " AND ".join(filters)
+    query += " GROUP BY exchange, symbol ORDER BY symbol"
+    with db() as conn:
+        rows = conn.execute(query, args).fetchall()
+    return {"instruments": [{"exchange": r["exchange"], "symbol": r["symbol"], "last_candle_at": r["latest"]} for r in rows]}
+
+
+@app.get("/api/scan")
+def scan(exchange: Literal["NSE", "BSE"] = "NSE", interval: str = "5m", min_relative_volume: float = 0):
+    with db() as conn:
+        symbols = conn.execute("SELECT DISTINCT symbol FROM candles WHERE exchange=? AND interval=? ORDER BY symbol", (exchange, interval)).fetchall()
+    results = []
+    for item in symbols:
+        symbol = item["symbol"]
+        with db() as conn:
+            rows = conn.execute("""SELECT * FROM (SELECT * FROM candles WHERE exchange=? AND symbol=? AND interval=? ORDER BY ts DESC LIMIT 250) ORDER BY ts ASC""", (exchange, symbol, interval)).fetchall()
+        if not rows:
+            continue
+        closes = [r["close"] for r in rows]
+        e9, e20 = ema(closes, 9), ema(closes, 20)
+        stance = "WAIT"
+        if e9 is not None and e20 is not None and closes[-1] > e9 > e20:
+            stance = "BUY"
+        elif e9 is not None and e20 is not None and closes[-1] < e9 < e20:
+            stance = "SELL"
+        volumes = [r["volume"] for r in rows if r["volume"] is not None]
+        relative_volume = None
+        if len(volumes) >= 21 and sum(volumes[-21:-1]) > 0:
+            relative_volume = volumes[-1] / (sum(volumes[-21:-1]) / 20)
+        if relative_volume is not None and relative_volume < min_relative_volume:
+            continue
+        atr = None
+        if len(rows) >= 15:
+            trs = [max(rows[j]["high"]-rows[j]["low"], abs(rows[j]["high"]-rows[j-1]["close"]), abs(rows[j]["low"]-rows[j-1]["close"])) for j in range(1, len(rows))]
+            atr = sum(trs[-14:]) / 14
+        results.append({"exchange": exchange, "symbol": symbol, "close": closes[-1],
+            "research_stance": stance, "entry_valid": False, "rsi14": rsi(closes),
+            "atr14": atr, "relative_volume": relative_volume, "source": rows[-1]["source"],
+            "timestamp": rows[-1]["ts"]})
+    return {"results": results, "live_data": False, "note": "Stored candles only; live entry unavailable."}
+
+
+class WatchItem(BaseModel):
+    symbol: str = Field(min_length=1, max_length=40)
+    exchange: Literal["NSE", "BSE"]
+    notes: str = Field(default="", max_length=200)
+
+
+@app.get("/api/watchlist")
+def get_watchlist():
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM watchlist ORDER BY added_at DESC").fetchall()
+    return {"watchlist": [dict(row) for row in rows]}
+
+
+@app.post("/api/watchlist")
+def add_watchlist(item: WatchItem):
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        conn.execute("""INSERT INTO watchlist(exchange,symbol,notes,added_at) VALUES(?,?,?,?)
+            ON CONFLICT(exchange,symbol) DO UPDATE SET notes=excluded.notes""",
+            (item.exchange, item.symbol.upper(), item.notes, now))
+    return {"ok": True, "exchange": item.exchange, "symbol": item.symbol.upper()}
+
+
+@app.delete("/api/watchlist/{symbol}")
+def delete_watchlist(symbol: str, exchange: Literal["NSE", "BSE"] = "NSE"):
+    with db() as conn:
+        conn.execute("DELETE FROM watchlist WHERE exchange=? AND symbol=?", (exchange, symbol.upper()))
+    return {"ok": True}
+
+
 app.mount('/', StaticFiles(directory=str(Path(__file__).parent / 'public'), html=True), name='dashboard')
