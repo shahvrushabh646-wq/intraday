@@ -7,6 +7,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import json
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, quote
+from urllib.request import Request, urlopen
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,6 +89,12 @@ class CandleBatch(BaseModel):
     candles: list[Candle] = Field(min_length=1, max_length=5000)
 
 
+class UpstoxSyncRequest(BaseModel):
+    exchange: Literal["NSE", "BSE"] = "NSE"
+    interval: Literal["1m", "3m", "5m", "10m", "15m", "30m", "1h"] = "5m"
+    symbols: list[str] = Field(min_length=1, max_length=30)
+
+
 class PaperOrder(BaseModel):
     symbol: str = Field(min_length=1, max_length=40)
     exchange: Literal["NSE", "BSE"]
@@ -101,6 +111,26 @@ def stamp(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def upstox_request(path: str, params: dict[str, str] | None = None) -> dict:
+    token = os.environ.get("UPSTOX_ACCESS_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(503, "Upstox is not configured. Add UPSTOX_ACCESS_TOKEN to Vercel Environment Variables.")
+    url = "https://api.upstox.com" + path
+    if params:
+        url += "?" + urlencode(params)
+    request = Request(url, headers={"Accept": "application/json", "Authorization": "Bearer " + token})
+    try:
+        with urlopen(request, timeout=12) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = "Upstox rejected the request. Check that the access token is valid and not expired."
+        if exc.code == 429:
+            detail = "Upstox rate limit reached. Wait briefly and try again."
+        raise HTTPException(502, detail) from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise HTTPException(502, "Could not reach Upstox market data. Try again shortly.") from exc
+
+
 @app.get("/api", include_in_schema=False)
 def service_home():
     return {"service": "INTRADAY AI API", "docs": "/docs", "health": "/api/health"}
@@ -114,9 +144,12 @@ def api_health():
 @app.get("/health")
 def health():
     with db() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM candles").fetchone()[0]
-    return {"status": "ok", "data_mode": "provider-disconnected", "stored_candles": count,
-            "market_data_source": None, "live_data": False,
+        row = conn.execute("SELECT COUNT(*) AS count, MAX(received_at) AS latest FROM candles").fetchone()
+    configured = bool(os.environ.get("UPSTOX_ACCESS_TOKEN", "").strip())
+    return {"status": "ok", "data_mode": "provider-connected" if configured else "provider-disconnected",
+            "stored_candles": row["count"], "last_received_at": row["latest"],
+            "market_data_source": "Upstox" if configured else None, "provider_configured": configured,
+            "live_data": False,
             "storage": "ephemeral /tmp SQLite; use managed PostgreSQL for durable production data" if os.environ.get("VERCEL") else "local SQLite"}
 
 
@@ -164,6 +197,65 @@ def rsi(values: list[float], period: int = 14) -> float | None:
     if avg_loss == 0:
         return 100.0 if avg_gain else 50.0
     return 100 - 100 / (1 + avg_gain / avg_loss)
+
+
+@app.get("/api/upstox/status")
+def upstox_status():
+    configured = bool(os.environ.get("UPSTOX_ACCESS_TOKEN", "").strip())
+    return {"provider": "Upstox", "configured": configured,
+            "status": "configured" if configured else "credentials_required",
+            "required_environment_variable": "UPSTOX_ACCESS_TOKEN",
+            "message": "Token configured; import current-session candles on demand." if configured else "Generate an Upstox access token and add it as UPSTOX_ACCESS_TOKEN in Vercel Production."}
+
+
+@app.post("/api/upstox/sync")
+def upstox_sync(payload: UpstoxSyncRequest):
+    if not os.environ.get("UPSTOX_ACCESS_TOKEN", "").strip():
+        raise HTTPException(503, "Add UPSTOX_ACCESS_TOKEN to Vercel Environment Variables, then redeploy.")
+    minute_intervals = {"1m": "1", "3m": "3", "5m": "5", "10m": "10", "15m": "15", "30m": "30", "1h": "60"}
+    interval = minute_intervals[payload.interval]
+    now = datetime.now(timezone.utc).isoformat()
+    saved, synced, skipped = 0, [], []
+    for raw_symbol in payload.symbols:
+        symbol = raw_symbol.strip().upper()
+        if not symbol or len(symbol) > 40:
+            continue
+        search = upstox_request("/v2/instruments/search", {
+            "query": symbol, "exchanges": payload.exchange, "segments": "EQ", "records": "30"
+        })
+        matches = [item for item in search.get("data", [])
+                   if item.get("exchange") == payload.exchange and
+                   item.get("trading_symbol", "").upper() == symbol and
+                   item.get("segment") in ("NSE_EQ", "BSE_EQ")]
+        if not matches:
+            skipped.append({"symbol": symbol, "reason": "No exact equity instrument match"})
+            continue
+        key = matches[0]["instrument_key"]
+        encoded_key = quote(key, safe="")
+        candles_url = "/v3/historical-candle/intraday/" + encoded_key + "/minutes/" + interval
+        data = upstox_request(candles_url)
+        candles = data.get("data", {}).get("candles", [])
+        if not candles:
+            skipped.append({"symbol": symbol, "reason": "Upstox returned no candles for the current session"})
+            continue
+        with db() as conn:
+            for candle in candles:
+                ts = datetime.fromisoformat(candle[0].replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    skipped.append({"symbol": symbol, "reason": "Upstox candle had no timezone"})
+                    continue
+                conn.execute("""INSERT INTO candles VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(exchange,symbol,interval,ts) DO UPDATE SET
+                    open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close,
+                    volume=excluded.volume, source=excluded.source, received_at=excluded.received_at""",
+                    (payload.exchange, symbol, payload.interval, ts.astimezone(timezone.utc).isoformat(),
+                     float(candle[1]), float(candle[2]), float(candle[3]), float(candle[4]),
+                     float(candle[5]) if candle[5] is not None else None, "Upstox REST", now))
+                saved += 1
+        synced.append(symbol)
+    return {"provider": "Upstox", "accepted": saved, "synced_symbols": synced,
+            "skipped": skipped, "interval": payload.interval, "received_at": now,
+            "storage_warning": "Vercel SQLite in /tmp is temporary; configure managed PostgreSQL for durable history."}
 
 
 @app.get("/v1/analysis/{exchange}/{symbol}")
