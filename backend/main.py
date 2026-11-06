@@ -11,7 +11,8 @@ import json
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, quote
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, build_opener, HTTPCookieProcessor
+from http.cookiejar import CookieJar
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -154,8 +155,11 @@ def nse_mcp_call(tool_name: str, arguments: dict) -> dict:
             "params": {"protocolVersion": "2025-03-26", "capabilities": {},
                        "clientInfo": {"name": "intraday-ai-research", "version": "1.0"}}}
     try:
+        # Keep provider cookies across initialize and tools/call. Some server-side
+        # MCP gateways bind the issued session ID to the cookie from initialize.
+        opener = build_opener(HTTPCookieProcessor(CookieJar()))
         request = Request(_NSE_MCP_URL, data=json.dumps(init).encode("utf-8"), headers=headers, method="POST")
-        with urlopen(request, timeout=8) as response:
+        with opener.open(request, timeout=8) as response:
             session_id = response.headers.get("Mcp-Session-Id")
             initialized = _mcp_payload(response.read().decode("utf-8"))
         if initialized.get("error") or not session_id:
@@ -166,7 +170,7 @@ def nse_mcp_call(tool_name: str, arguments: dict) -> dict:
         call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": {"name": tool_name, "arguments": arguments}}
         request = Request(_NSE_MCP_URL, data=json.dumps(call).encode("utf-8"), headers=headers, method="POST")
-        with urlopen(request, timeout=8) as response:
+        with opener.open(request, timeout=8) as response:
             envelope = _mcp_payload(response.read().decode("utf-8"))
         if envelope.get("error"):
             raise ValueError("NSE MCP tool call failed")
