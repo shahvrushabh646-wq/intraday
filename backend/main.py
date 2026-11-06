@@ -186,10 +186,10 @@ def nse_mcp_call(tool_name: str, arguments: dict) -> dict:
             upstream_detail = exc.read(240).decode("utf-8", errors="replace").strip()
         except Exception:
             upstream_detail = ""
-        detail = f"NSE public market snapshot is unavailable (HTTP {exc.code})."
         if upstream_detail:
-            detail += " " + upstream_detail[:180]
-        raise HTTPException(502, detail) from exc
+            # Keep provider internals in server logs; do not expose stack traces in UI.
+            print("NSE MCP upstream HTTP error", exc.code, upstream_detail[:180])
+        raise HTTPException(502, f"NSE public market snapshot is unavailable (HTTP {exc.code}).") from exc
     except (URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(502, "NSE public market snapshot is temporarily unavailable.") from exc
 
