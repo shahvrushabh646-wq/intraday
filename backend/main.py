@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -54,6 +55,9 @@ def init_db():
           close REAL NOT NULL, volume REAL, source TEXT NOT NULL, received_at TEXT NOT NULL,
           PRIMARY KEY(exchange, symbol, interval, ts));
         CREATE INDEX IF NOT EXISTS candles_lookup ON candles(symbol, interval, ts);
+        CREATE TABLE IF NOT EXISTS watchlist (
+          exchange TEXT NOT NULL, symbol TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '',
+          added_at TEXT NOT NULL, PRIMARY KEY(exchange,symbol));
         CREATE TABLE IF NOT EXISTS paper_trades (
           id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, exchange TEXT NOT NULL,
           side TEXT NOT NULL, quantity INTEGER NOT NULL, entry REAL NOT NULL, stop REAL NOT NULL,
@@ -98,26 +102,9 @@ def stamp(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-@app.get("/", response_class=HTMLResponse, include_in_schema=False)
-@app.get("/api", response_class=HTMLResponse, include_in_schema=False)
+@app.get("/api", include_in_schema=False)
 def service_home():
-    """Give the backend domain a useful landing page instead of FastAPI's 404."""
-    return HTMLResponse("""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>INTRADAY AI · Backend</title>
-<style>
-:root{color-scheme:dark;--bg:#0b1118;--card:#111a23;--line:#25313d;--text:#e5ebf1;--muted:#9aa8b5;--green:#38d99a;--amber:#e9b85b}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif;min-height:100vh;display:grid;place-items:center}
-main{width:min(680px,92vw);padding:30px;border:1px solid var(--line);border-radius:14px;background:var(--card)}
-.brand{font-weight:800;letter-spacing:.1em;color:var(--green);font-size:12px}h1{font-size:30px;margin:16px 0 8px}p{color:var(--muted);line-height:1.6}
-.status{border:1px solid #735c2e;background:#30261755;color:var(--amber);padding:12px;border-radius:8px;margin:22px 0}
-.links{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px}a{color:var(--green);border:1px solid var(--line);padding:10px 13px;border-radius:7px;text-decoration:none}a:hover{border-color:var(--green)}
-small{color:var(--muted)}
-</style></head><body><main><div class="brand">INTRADAY AI · API SERVICE</div><h1>Backend is running</h1>
-<p>This domain serves the research API. It is not the trading dashboard. Open the frontend deployment domain to use the interface.</p>
-<div class="status">Market-data provider: not connected · Live prices and live signals are unavailable.</div>
-<div class="links"><a href="/docs">API documentation</a><a href="/health">Service health</a><a href="/api/health">Health API</a></div>
-<p><small>Research and paper trading only. No real orders are placed.</small></p></main></body></html>""")
+    return {"service": "INTRADAY AI API", "docs": "/docs", "health": "/api/health"}
 
 
 @app.get("/api/health", include_in_schema=False)
@@ -245,3 +232,6 @@ def list_paper_trades():
     with db() as conn:
         rows = conn.execute("SELECT * FROM paper_trades ORDER BY id DESC").fetchall()
     return {"mode": "paper", "trades": [dict(r) for r in rows]}
+
+
+app.mount('/', StaticFiles(directory=str(Path(__file__).parent / 'public'), html=True), name='dashboard')
