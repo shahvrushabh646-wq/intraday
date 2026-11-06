@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -316,5 +315,3 @@ def delete_watchlist(symbol: str, exchange: Literal["NSE", "BSE"] = "NSE"):
         conn.execute("DELETE FROM watchlist WHERE exchange=? AND symbol=?", (exchange, symbol.upper()))
     return {"ok": True}
 
-
-app.mount('/', StaticFiles(directory=str(Path(__file__).parent / 'public'), html=True), name='dashboard')
