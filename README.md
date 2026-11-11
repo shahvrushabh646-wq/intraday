@@ -45,7 +45,7 @@ The Node dashboard exposes `POST /api/accuracy/assessment` with a JSON body such
   "symbol": "TATASTEEL",
   "interval": "5m",
   "capital": 1000,
-  "estimatedRoundTripCosts": 0
+  "estimatedRoundTripCosts": null
 }
 ```
 
