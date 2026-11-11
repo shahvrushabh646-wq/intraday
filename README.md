@@ -35,6 +35,34 @@ uvicorn main:app --reload
 
 Visit `http://127.0.0.1:8000/docs`.
 
+## Accuracy-first decision gate
+
+The Node dashboard exposes `POST /api/accuracy/assessment` with a JSON body such as:
+
+```json
+{
+  "exchange": "NSE",
+  "symbol": "TATASTEEL",
+  "interval": "5m",
+  "capital": 1000,
+  "estimatedRoundTripCosts": 0
+}
+```
+
+The example cost is only a schema illustration, not a Groww fee quote. Supply current, verified round-trip charges; do not assume zero. The gate fails closed unless candle count and freshness, positive-volume history, three independent strategy families, higher-timeframe trend, index trend, sector trend, risk sizing, and net reward/risk checks all pass. Capital defaults to ₹1,000 and risk per trade is capped at 0.5% in this gate. With provider/context feeds not connected, the correct result is `NO TRADE`.
+
+The Risk Management screen also defaults to ₹1,000 capital. It requires a target and total round-trip charges, enforces a maximum 1% risk input, and rejects a setup if quantity, capital, or net 1:2 reward/risk checks fail. A passing sizing calculation is not a trading signal.
+
+## Local dashboard
+
+The browser dashboard is served by the Node 22+ application:
+
+```bash
+npm start
+```
+
+Open `http://127.0.0.1:3000`. The local dashboard stores its SQLite database under `data/`. Back up this folder; it is not a multi-user or cloud-durable production database. The separate root `main.py` FastAPI service remains an API foundation and does not serve the browser dashboard.
+
 ## Data and trading boundaries
 
 No market-data provider is connected. Only ingest market data you are licensed to store and use; every candle must include a timezone and source label. This API does not fetch live data, issue verified live signals, or submit real-money orders. It is a research and paper-trading foundation, not investment advice. Authentication, account isolation, rate limits, audit logging, durable database configuration, provider integration and production monitoring must be completed before public use.
